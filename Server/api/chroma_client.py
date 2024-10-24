@@ -1,26 +1,34 @@
 import chromadb
-from chromadb.config import Settings
 import os
+from chromadb.config import Settings
 
 
 def get_chroma_client():
+    # Create persist directory if it doesn't exist
     persist_directory = os.path.join(os.getcwd(), "chroma_db")
-
-    # Ensure the directory exists
     os.makedirs(persist_directory, exist_ok=True)
 
-    # Initialize the client with persistence
-    client = chromadb.Client(Settings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory=persist_directory
-    ))
+    # Initialize the client with the new configuration
+    client = chromadb.PersistentClient(
+        path=persist_directory,
+        settings=Settings(
+            allow_reset=True,
+            anonymized_telemetry=False
+        )
+    )
 
     return client
 
 
 def get_or_create_collection(client, name="documents"):
     try:
-        collection = client.get_collection(name)
+        # Try to get existing collection
+        collection = client.get_collection(name=name)
     except ValueError:
-        collection = client.create_collection(name)
+        # Create new collection if it doesn't exist
+        collection = client.create_collection(
+            name=name,
+            # Using cosine similarity for embeddings
+            metadata={"hnsw:space": "cosine"}
+        )
     return collection

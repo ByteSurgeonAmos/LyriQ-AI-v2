@@ -7,8 +7,7 @@ class UploadedDocument(models.Model):
     processed = models.BooleanField(default=False)
     title = models.CharField(max_length=255, blank=True)
     content = models.TextField(blank=True)
-    language = models.CharField(
-        max_length=10, default='en')  # For language detection
+    language = models.CharField(max_length=10, default='en')
     average_sentiment = models.FloatField(null=True, blank=True)
 
     def __str__(self):
@@ -19,6 +18,8 @@ class ChatSession(models.Model):
     session_id = models.CharField(max_length=100, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_interaction = models.DateTimeField(auto_now=True)
+    current_document = models.ForeignKey(
+        UploadedDocument, null=True, blank=True, on_delete=models.SET_NULL)
 
     def __str__(self):
         return self.session_id
