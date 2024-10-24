@@ -1,0 +1,74 @@
+{
+    "info": {
+        "name": "RAP-Bot Testing",
+        "description": "Complete test suite for RAP-Bot API",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "1. Upload Document",
+            "request": {
+                "method": "POST",
+                "url": "http://localhost:8000/api/upload/",
+                "body": {
+                    "mode": "formdata",
+                    "formdata": [
+                        {
+                            "key": "file",
+                            "type": "file",
+                            "src": "./mixed_emotions_lyrics.txt"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "name": "2. Start New Chat",
+            "request": {
+                "method": "POST",
+                "url": "http://localhost:8000/api/chat/",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n    \"message\": \"What emotions are expressed in these lyrics?\",\n    \"document_id\": 1\n}"
+                }
+            }
+        },
+        {
+            "name": "3. Continue Chat",
+            "request": {
+                "method": "POST",
+                "url": "http://localhost:8000/api/chat/",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n    \"session_id\": \"YOUR_SESSION_ID\",\n    \"message\": \"How does the mood change throughout the song?\"\n}"
+                }
+            }
+        },
+        {
+            "name": "4. View Session History",
+            "request": {
+                "method": "GET",
+                "url": "http://localhost:8000/api/chat/history/YOUR_SESSION_ID/"
+            }
+        },
+        {
+            "name": "5. View All Sessions",
+            "request": {
+                "method": "GET",
+                "url": "http://localhost:8000/api/chat/history/"
+            }
+        }
+    ]
+}
