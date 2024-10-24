@@ -66,7 +66,6 @@ class DocumentUploadView(APIView):
 class ChatView(APIView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Initialize text generation pipeline
         self.generator = pipeline(
             "text2text-generation",
             model="google/flan-t5-base",
@@ -82,6 +81,8 @@ class ChatView(APIView):
     def post(self, request, *args, **kwargs):
         session_id = request.data.get('session_id')
         message = request.data.get('message')
+        # Add document_id for setting the current document
+        document_id = request.data.get('document_id')
 
         if not message:
             return Response({"error": "Message is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -96,10 +97,24 @@ class ChatView(APIView):
             except ChatSession.DoesNotExist:
                 return Response({"error": "Invalid session ID"}, status=status.HTTP_404_NOT_FOUND)
 
+        # If document_id is provided, set it as the current document
+        if document_id:
+            try:
+                document = UploadedDocument.objects.get(id=document_id)
+                session.current_document = document
+                session.save()
+            except UploadedDocument.DoesNotExist:
+                return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            # Ensure there's a current document in the session
+            if not session.current_document:
+                return Response({"error": "Document ID is required for querying."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Use the current document if no new document_id is provided
+            document = session.current_document
+
         # Process user message
         processor = DocumentProcessor()
-
-        # Analyze sentiment of user message
         sentiment_result = processor.analyze_sentiment(message)
 
         # Save user message
@@ -111,7 +126,7 @@ class ChatView(APIView):
         )
 
         try:
-            # Get relevant context from ChromaDB
+            # Get relevant context from ChromaDB for the current document
             query_embedding = processor.generate_embeddings(message)
             chroma_client = get_chroma_client()
             collection = get_or_create_collection(chroma_client)
@@ -121,7 +136,6 @@ class ChatView(APIView):
                 n_results=3
             )
 
-            # Generate response
             if results['documents']:
                 context = " ".join(results['documents'][0])
                 response = self.generate_response(context, message)
@@ -133,7 +147,8 @@ class ChatView(APIView):
                 session=session,
                 content=response,
                 is_user=False,
-                sentiment_score=processor.analyze_sentiment(response)['score']
+                sentiment_score=processor.analyze_sentiment(response)['score'],
+                relevant_document=document  # Link to the current document
             )
 
             return Response({
@@ -154,11 +169,60 @@ class ChatHistoryView(APIView):
         if session_id:
             try:
                 session = ChatSession.objects.get(session_id=session_id)
-                serializer = ChatSessionSerializer(session)
-                return Response(serializer.data)
+                # Get associated document information
+                document_info = None
+                if session.current_document:
+                    document_info = {
+                        'id': session.current_document.id,
+                        'title': session.current_document.title or session.current_document.file.name,
+                        'uploaded_at': session.current_document.uploaded_at
+                    }
+
+                # Get all messages for this session
+                messages = ChatMessage.objects.filter(
+                    session=session).order_by('timestamp')
+                messages_data = [{
+                    'content': msg.content,
+                    'is_user': msg.is_user,
+                    'sentiment_score': msg.sentiment_score,
+                    'timestamp': msg.timestamp
+                } for msg in messages]
+
+                return Response({
+                    'session_id': session.session_id,
+                    'created_at': session.created_at,
+                    'last_interaction': session.last_interaction,
+                    'current_document': document_info,
+                    'messages': messages_data
+                })
             except ChatSession.DoesNotExist:
-                return Response({"error": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {"error": "Session not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
         else:
+            # Return list of all chat sessions
             sessions = ChatSession.objects.all().order_by('-last_interaction')
-            serializer = ChatSessionSerializer(sessions, many=True)
-            return Response(serializer.data)
+            sessions_data = [{
+                'session_id': session.session_id,
+                'created_at': session.created_at,
+                'last_interaction': session.last_interaction,
+                'document': session.current_document.title if session.current_document else None,
+                'message_count': session.messages.count()
+            } for session in sessions]
+
+            return Response(sessions_data)
+
+    def delete(self, request, session_id):
+        try:
+            session = ChatSession.objects.get(session_id=session_id)
+            session.delete()
+            return Response(
+                {"message": "Chat session deleted successfully"},
+                status=status.HTTP_200_OK
+            )
+        except ChatSession.DoesNotExist:
+            return Response(
+                {"error": "Session not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
