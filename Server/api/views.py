@@ -68,20 +68,26 @@ class ChatView(APIView):
         super().__init__(*args, **kwargs)
         self.generator = pipeline(
             "text2text-generation",
-            model="google/flan-t5-base",
+            model="google/flan-t5-large",
             device=0 if torch.cuda.is_available() else -1,
         )
 
     def generate_response(self, context: str, question: str) -> str:
         prompt = f"""Context: {context}\n\nQuestion: {question}\n\nAnswer:"""
         response = self.generator(
-            prompt, max_length=150, num_return_sequences=1)
+            prompt,
+            max_length=300,  # Increased max length
+            min_length=50,   # Added minimum length
+            num_return_sequences=1,
+            temperature=0.7,  # Added temperature for more natural responses
+            do_sample=True   # Enable sampling for more diverse responses
+        )
         return response[0]['generated_text']
+
 
     def post(self, request, *args, **kwargs):
         session_id = request.data.get('session_id')
         message = request.data.get('message')
-        # Add document_id for setting the current document
         document_id = request.data.get('document_id')
 
         if not message:
@@ -97,7 +103,7 @@ class ChatView(APIView):
             except ChatSession.DoesNotExist:
                 return Response({"error": "Invalid session ID"}, status=status.HTTP_404_NOT_FOUND)
 
-        # If document_id is provided, set it as the current document
+        # Handle document selection
         if document_id:
             try:
                 document = UploadedDocument.objects.get(id=document_id)
@@ -106,11 +112,8 @@ class ChatView(APIView):
             except UploadedDocument.DoesNotExist:
                 return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
         else:
-            # Ensure there's a current document in the session
             if not session.current_document:
                 return Response({"error": "Document ID is required for querying."}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Use the current document if no new document_id is provided
             document = session.current_document
 
         # Process user message
@@ -131,16 +134,24 @@ class ChatView(APIView):
             chroma_client = get_chroma_client()
             collection = get_or_create_collection(chroma_client)
 
+            # Query with document-specific filter
             results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=3
+                n_results=3,
+                where={"file_name": {"$eq": document.file.name}}  # Filter by current document
             )
 
-            if results['documents']:
-                context = " ".join(results['documents'][0])
-                response = self.generate_response(context, message)
-            else:
-                response = "I don't have enough information to answer that question."
+            # Fallback if no results found for the current document
+            if not results['documents'] or not results['documents'][0]:
+                return Response({
+                    "session_id": session_id,
+                    "response": "I don't have any information from the current document to answer that question.",
+                    "user_sentiment": sentiment_result,
+                    "response_sentiment": 0.0
+                })
+
+            context = " ".join(results['documents'][0])
+            response = self.generate_response(context, message)
 
             # Save bot response
             bot_message = ChatMessage.objects.create(
@@ -148,21 +159,22 @@ class ChatView(APIView):
                 content=response,
                 is_user=False,
                 sentiment_score=processor.analyze_sentiment(response)['score'],
-                relevant_document=document  # Link to the current document
+                relevant_document=document
             )
 
             return Response({
                 "session_id": session_id,
                 "response": response,
                 "user_sentiment": sentiment_result,
-                "response_sentiment": bot_message.sentiment_score
+                "response_sentiment": bot_message.sentiment_score,
+                "document_id": document.id  # Add document_id to response for clarity
             })
 
         except Exception as e:
+            print(f"Error in chat processing: {str(e)}")  # Add logging for debugging
             return Response({
                 "error": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 class ChatHistoryView(APIView):
     def get(self, request, session_id=None):
