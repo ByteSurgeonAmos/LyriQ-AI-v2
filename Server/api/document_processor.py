@@ -8,16 +8,19 @@ from langdetect import detect, LangDetectException
 class DocumentProcessor:
     def __init__(self):
         # Initialize sentiment models for different languages
+        self.device = 0 if torch.cuda.is_available() else -1
+
+        # Initialize sentiment models without return_all_scores
         self.sentiment_models = {
             'en': pipeline(
                 "sentiment-analysis",
                 model="distilbert-base-uncased-finetuned-sst-2-english",
-                device=-1
+                device=self.device
             ),
             'de': pipeline(
                 "sentiment-analysis",
                 model="oliverguhr/german-sentiment-bert",
-                device=-1
+                device=self.device
             )
         }
 
@@ -28,7 +31,7 @@ class DocumentProcessor:
         self.embedding_model = pipeline(
             'feature-extraction',
             model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            device=-1
+            device=self.device
         )
 
     def detect_language(self, text: str) -> str:
@@ -39,44 +42,6 @@ class DocumentProcessor:
         except LangDetectException:
             return 'en'
 
-    def chunk_text(self, text: str, max_length: int = 512) -> List[str]:
-        """Split text into chunks based on simple sentence splitting."""
-        sentences = []
-        current = []
-        # Preserve line breaks for lyrics structure
-        lines = text.split('\n')
-        text_with_breaks = ' [BREAK] '.join(lines)
-        words = text_with_breaks.split()
-
-        for word in words:
-            current.append(word)
-            if word.endswith(('.', '!', '?', '[BREAK]')) and len(current) >= 5:
-                sentences.append(' '.join(current).replace(' [BREAK] ', '\n'))
-                current = []
-
-        if current:
-            sentences.append(' '.join(current).replace(' [BREAK] ', '\n'))
-
-        chunks = []
-        current_chunk = []
-        current_length = 0
-
-        for sentence in sentences:
-            sentence_length = len(sentence.split())
-            if current_length + sentence_length > max_length:
-                if current_chunk:
-                    chunks.append('\n'.join(current_chunk))
-                current_chunk = [sentence]
-                current_length = sentence_length
-            else:
-                current_chunk.append(sentence)
-                current_length += sentence_length
-
-        if current_chunk:
-            chunks.append('\n'.join(current_chunk))
-
-        return chunks if chunks else [text]
-
     def analyze_sentiment(self, text: str, language: str = None) -> Dict[str, Any]:
         """Analyze sentiment of text using language-specific models."""
         try:
@@ -85,18 +50,18 @@ class DocumentProcessor:
 
             sentiment_model = self.sentiment_models.get(
                 language, self.default_sentiment_model)
-            result = sentiment_model(text[:512])
+            result = sentiment_model(text[:512])[0]
 
             if language == 'de':
-                score = result[0]['score']
-                label = result[0]['label']
+                score = result['score']
+                label = result['label']
                 if label == 'negative':
                     score = -score
             else:
-                score = result[0]['score']
-                if result[0]['label'] == 'NEGATIVE':
+                score = result['score']
+                if result['label'] == 'NEGATIVE':
                     score = -score
-                label = result[0]['label']
+                label = result['label']
 
             return {
                 'score': score,
@@ -116,8 +81,8 @@ class DocumentProcessor:
             print(f"Error generating embeddings: {str(e)}")
             return [0.0] * self.embedding_model.model.config.hidden_size
 
-    def process_document(self, text: str, document_id: str = None) -> Dict[str, Any]:
-        """Process document text with language detection and document ID tracking."""
+    def process_document(self, text: str) -> Dict[str, Any]:
+        """Process document text with language detection."""
         try:
             language = self.detect_language(text)
             chunks = self.chunk_text(text)
@@ -154,3 +119,40 @@ class DocumentProcessor:
                 'language': 'en',
                 'chunk_count': 1
             }
+
+    def chunk_text(self, text: str, max_length: int = 512) -> List[str]:
+        """Split text into chunks based on simple sentence splitting."""
+        sentences = []
+        current = []
+        lines = text.split('\n')
+        text_with_breaks = ' [BREAK] '.join(lines)
+        words = text_with_breaks.split()
+
+        for word in words:
+            current.append(word)
+            if word.endswith(('.', '!', '?', '[BREAK]')) and len(current) >= 5:
+                sentences.append(' '.join(current).replace(' [BREAK] ', '\n'))
+                current = []
+
+        if current:
+            sentences.append(' '.join(current).replace(' [BREAK] ', '\n'))
+
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for sentence in sentences:
+            sentence_length = len(sentence.split())
+            if current_length + sentence_length > max_length:
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                current_chunk = [sentence]
+                current_length = sentence_length
+            else:
+                current_chunk.append(sentence)
+                current_length += sentence_length
+
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+
+        return chunks if chunks else [text]
