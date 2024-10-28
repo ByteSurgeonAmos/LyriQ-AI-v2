@@ -25,13 +25,13 @@ interface UploadedDoc {
   styleUrls: ['./app.component.css']
 })
 export class AppComponent {
-  activeMode: 'sentiment' | 'chat' = 'sentiment';
+  activeMode: 'sentiment' | 'chat' = 'chat';
   messageInput = '';
   selectedLanguage: 'en' | 'de' = 'en';
   messages: Message[] = [];
   uploadedDocs: UploadedDoc[] = [];
   currentSessionId: string | null = null;
-  
+  currentDocumentId: number | null = null;
   // New state management properties
   isLoading = {
     upload: false,
@@ -43,7 +43,7 @@ export class AppComponent {
   };
   uploadProgress = 0;
 
-  constructor(private rapBotService: RapBotService) {}
+  constructor(private rapBotService: RapBotService) { }
 
   setMode(mode: 'sentiment' | 'chat') {
     this.activeMode = mode;
@@ -99,7 +99,7 @@ export class AppComponent {
     this.clearErrors();
     this.uploadProgress = 0;
 
-    const validFiles = Array.from(files).filter(file => 
+    const validFiles = Array.from(files).filter(file =>
       file.type === 'text/plain' || file.type === 'application/pdf'
     );
 
@@ -121,9 +121,21 @@ export class AppComponent {
             type: file.type,
             id: documentId
           });
+
+          // Add upload success message with sentiment analysis
+          const sentimentType = response.sentiment > 0.5 ? 'positive' : 'negative';
+          this.messages.push({
+            sender: 'bot',
+            content: `Document uploaded successfully:
+            Sentiment: ${sentimentType.toUpperCase()} (${(response.sentiment * 100).toFixed(1)}%)
+            Language: ${response.language.toUpperCase()}
+            `,
+            sentiment: sentimentType
+          });
+
           completedFiles++;
           this.uploadProgress = (completedFiles / totalFiles) * 100;
-          
+
           if (completedFiles === totalFiles) {
             this.isLoading.upload = false;
             this.uploadProgress = 0;
@@ -136,20 +148,71 @@ export class AppComponent {
       });
     });
   }
-
   async sendMessage() {
     if (!this.messageInput.trim()) return;
-    
+
     this.isLoading.message = true;
     this.clearErrors();
-    
+
     const userMessage = this.messageInput;
     this.messages.push({ sender: 'user', content: userMessage });
-    this.messageInput = ''; // Clear input immediately
+    this.messageInput = ''; 
 
     if (this.activeMode === 'sentiment') {
+      // If no session exists, start a new chat
+      if (!this.currentSessionId) {
+        this.rapBotService.startNewChat(userMessage).subscribe({
+          next: response => {
+            this.currentSessionId = response.document_id;
+            const sentimentType = response.sentiment > 0.5 ? 'positive' : 'negative';
+            this.messages.push({
+              sender: 'bot',
+              content: `Sentiment: ${sentimentType.toUpperCase()} (${(response.sentiment * 100).toFixed(1)}%)
+              Language: ${response.language.toUpperCase()}
+              `,
+              sentiment: sentimentType
+            });
+            this.isLoading.message = false;
+          },
+          error: error => {
+            this.messages.push({
+              sender: 'bot',
+              content: 'Sorry, I encountered an error analyzing the sentiment.',
+              error: true
+            });
+            this.errors.message = `Error: ${error.message}`;
+            this.isLoading.message = false;
+          }
+        });
+      } else {
+        // Continue existing chat session for sentiment analysis
+        this.rapBotService.continueChat(userMessage, this.currentSessionId).subscribe({
+          next: response => {
+            const sentimentType = response.user_sentiment.score > 0.5 ? 'positive' : 'negative';
+            this.messages.push({
+              sender: 'bot',
+              content: `${response.response}
+              Sentiment: ${sentimentType.toUpperCase()} (${(response.user_sentiment.score * 100).toFixed(1)}%)
+              Language: ${response.language.toUpperCase()}
+            `,
+              sentiment: sentimentType
+            });
+            this.isLoading.message = false;
+          },
+          error: error => {
+            this.messages.push({
+              sender: 'bot',
+              content: 'Sorry, I encountered an error analyzing the sentiment.',
+              error: true
+            });
+            this.errors.message = `Error: ${error.message}`;
+            this.isLoading.message = false;
+          }
+        });
+      }
+    } else if (this.activeMode === 'chat') {
+      // Chat mode logic remains the same
       const doc = this.uploadedDocs[0];
-      
       if (!doc?.id) {
         this.errors.message = 'Please upload a document first.';
         this.isLoading.message = false;
@@ -158,30 +221,10 @@ export class AppComponent {
 
       this.rapBotService.startNewChat(userMessage, doc.id).subscribe({
         next: response => {
-          this.currentSessionId = response.session_id;
           this.messages.push({
             sender: 'bot',
-            content: '',
-            sentiment: response.response
-          });
-          this.isLoading.message = false;
-        },
-        error: error => {
-          this.messages.push({
-            sender: 'bot',
-            content: 'Sorry, I encountered an error analyzing the sentiment.',
-            error: true
-          });
-          this.errors.message = `Error: ${error.message}`;
-          this.isLoading.message = false;
-        }
-      });
-    } else if (this.currentSessionId) {
-      this.rapBotService.continueChat(this.currentSessionId, userMessage).subscribe({
-        next: response => {
-          this.messages.push({
-            sender: 'bot',
-            content: response.response
+            content: response.response,
+            sentiment: response.sentiment
           });
           this.isLoading.message = false;
         },
@@ -195,12 +238,8 @@ export class AppComponent {
           this.isLoading.message = false;
         }
       });
-    } else {
-      this.errors.message = 'No active session. Please start with sentiment analysis first.';
-      this.isLoading.message = false;
     }
   }
-
   removeDocument(docIndex: number) {
     this.uploadedDocs.splice(docIndex, 1);
     if (this.uploadedDocs.length === 0) {
