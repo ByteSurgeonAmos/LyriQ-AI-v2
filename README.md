@@ -10,7 +10,7 @@
 | LLMs        | BERT, LLAMA2                     |
 | Frontend    | Angular                          |
 | Backend     | Django (REST API)                |
-| Database    | Chroma / FAISS / DeepLake        |
+| Database    | Chroma         |
 | Libraries   | LangChain, Pandas, Transformers  |
 
 ---
