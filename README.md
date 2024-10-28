@@ -1,6 +1,6 @@
-#LyriQ-AI
+# LyriQ-AI
 
-#Technology Stack
+# Technology Stack
 Component	   Details
 Dataset  	   German and English Rap Lyrics
 LLMs	       BERT, LLAMA2
