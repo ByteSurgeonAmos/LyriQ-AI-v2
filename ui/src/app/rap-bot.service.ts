@@ -24,23 +24,27 @@ export class RapBotService {
     return this.http.post(`${this.apiUrl}/upload/`, formData);
   }
 
-  // 2. Start New Chat
-  startNewChat(message: string, documentId: number): Observable<any> {
+  // Updated startNewChat function
+  startNewChat(message: string, documentId?: number): Observable<any> {
     const headers = new HttpHeaders({ 'Content-Type': 'application/json' });
-    const body: ChatRequest = {
-      message,
-      document_id: documentId
-    };
+    const body: any = documentId !== undefined ? { message } : { text: message };
 
-    return this.http.post(`${this.apiUrl}/chat/`, body, { headers });
+    // If documentId is provided, use /chat endpoint, otherwise use /upload
+    const endpoint = documentId !== undefined ? '/chat/' : '/upload/';
+
+    if (documentId !== undefined) {
+      body.document_id = documentId;
+    }
+
+    return this.http.post(`${this.apiUrl}${endpoint}`, body, { headers });
   }
 
   // 3. Continue Chat
-  continueChat(sessionId: string, message: string): Observable<any> {
+  continueChat(message: string, sessionId: string,): Observable<any> {
     const headers = new HttpHeaders({ 'Content-Type': 'application/json' });
     const body: ChatRequest = {
-      session_id: sessionId,
-      message
+      message,
+      document_id: sessionId as unknown as number,
     };
 
     return this.http.post(`${this.apiUrl}/chat/`, body, { headers });
