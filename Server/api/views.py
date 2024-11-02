@@ -1,3 +1,4 @@
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 from typing import List, Dict, Any, Optional, Union
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -100,17 +101,31 @@ class DocumentUploadView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+logger = logging.getLogger(__name__)
+
+
 class ChatView(APIView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.device = 0 if torch.cuda.is_available() else -1
 
-        # Initialize multilingual model
+        # Initialize LLAMA 2 model
         try:
+            model_name = "meta-llama/Llama-3.1-8B"
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name, use_auth_token=True)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, device_map="auto", use_auth_token=True)
+
             self.generator = pipeline(
-                "text2text-generation",
-                model="google/flan-t5-large",
-                device=0 if torch.cuda.is_available() else -1,
+                "text-generation",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                device=self.device,
+                device_map="auto",        # Automatically dispatch parts to available devices
+                offload_folder="offload",  # Folder to store offloaded weights
+                offload_index="disk",
                 model_kwargs={
                     "temperature": 0.7,
                     "top_p": 0.9,
@@ -120,419 +135,138 @@ class ChatView(APIView):
                     "early_stopping": True
                 }
             )
-            logger.info("Successfully initialized MT5 model")
+            logger.info("Successfully initialized LLama 2 model for RAP-Bot.")
         except Exception as e:
-            logger.error(f"Error initializing model: {str(e)}")
+            logger.error(f"Error initializing LLama 2 model: {str(e)}")
             raise
 
-        # Initialize response cache
         self._response_cache = {}
-
-        # Define supported languages
         self.supported_languages = {'en', 'de'}
 
-    def get_analysis_prompt(self, question_type: str, language: str = 'en') -> str:
-        """Generate language-specific analysis prompts"""
-
+    def get_analysis_prompt(self, question_type: str) -> str:
+        """Generate a prompt to guide the analysis based on question type."""
         prompts = {
-            'en': {
-                'sentiment': """Using only specific evidence from these lyrics, analyze their emotional content by:
-1. Identifying explicit emotional words and phrases (quote them)
-2. Noting any emotional changes throughout the text
-3. Discussing the intensity of emotions shown
-4. Connecting emotions to specific quoted lines
-
-Remember: Only discuss emotions directly expressed in the lyrics.""",
-
-                'theme': """Using only specific evidence from these lyrics, analyze their themes by:
-1. Identifying main themes with direct quotes
-2. Pointing out specific metaphors or symbols
-3. Showing how themes develop using line references
-4. Connecting themes to explicit evidence
-
-Remember: Only discuss themes directly present in the lyrics.""",
-
-                'structure': """Using only specific evidence from these lyrics, analyze their structure by:
-1. Mapping out the exact organization (verse/chorus/etc.)
-2. Identifying specific patterns or repetitions
-3. Showing how structure affects meaning
-4. Noting unique structural elements
-
-Remember: Only discuss structural elements directly present in the lyrics.""",
-
-                'general': """Using only specific evidence from these lyrics, provide analysis by:
-1. Identifying main ideas with direct quotes
-2. Noting specific techniques used
-3. Discussing clear patterns or elements
-4. Supporting all points with exact quotes
-
-Remember: Only discuss what is explicitly present in the lyrics."""
-            },
-
-            'de': {
-                'sentiment': """Analysieren Sie die emotionalen Aspekte dieser Lyrics, basierend nur auf dem Text:
-1. Identifizieren Sie konkrete emotionale Wörter und Phrasen (mit Zitaten)
-2. Beschreiben Sie die emotionale Entwicklung im Text
-3. Diskutieren Sie die Intensität der gezeigten Gefühle
-4. Belegen Sie Ihre Analyse mit spezifischen Textstellen
-
-Wichtig: Beziehen Sie sich nur auf explizit im Text vorhandene Emotionen.""",
-
-                'theme': """Analysieren Sie die Hauptthemen dieser Lyrics, basierend nur auf dem Text:
-1. Identifizieren Sie die zentralen Themen mit direkten Zitaten
-2. Zeigen Sie verwendete Metaphern oder Symbole
-3. Beschreiben Sie die Entwicklung der Themen
-4. Belegen Sie alle Punkte mit Textzitaten
-
-Wichtig: Beziehen Sie sich nur auf explizit im Text vorhandene Themen.""",
-
-                'structure': """Analysieren Sie den Aufbau dieser Lyrics:
-1. Beschreiben Sie die genaue Organisation (Strophe/Refrain)
-2. Identifizieren Sie Muster und Wiederholungen
-3. Zeigen Sie die Beziehung zwischen Struktur und Bedeutung
-4. Notieren Sie besondere strukturelle Elemente
-
-Wichtig: Beziehen Sie sich nur auf die tatsächliche Textstruktur.""",
-
-                'general': """Analysieren Sie diese Lyrics objektiv:
-1. Identifizieren Sie Hauptaussagen mit Zitaten
-2. Beschreiben Sie verwendete Techniken
-3. Zeigen Sie klare Muster
-4. Belegen Sie alle Punkte mit Textstellen
-
-Wichtig: Bleiben Sie bei den expliziten Textinhalten."""
-            }
+            'sentiment': "Analyze the emotional content in the provided lyrics based on specific evidence.",
+            'theme': "Identify themes in the provided lyrics using direct quotes.",
+            'structure': "Analyze the structure of the provided lyrics and describe any patterns.",
+            'general': "Provide a general analysis of the provided lyrics."
         }
-
-        language_prompts = prompts.get(language, prompts['en'])
-        return language_prompts.get(question_type, language_prompts['general'])
+        return prompts.get(question_type, prompts['general'])
 
     def determine_question_type(self, question: str) -> str:
-        """Determine question type with multilingual support"""
+        """Identify question type based on keywords."""
         question = question.lower()
-
         patterns = {
-            'sentiment': {
-                'en': r'\b(emotion|feel|sentiment|mood|tone|attitude|express)\b',
-                'de': r'\b(gefühl|emotion|stimmung|ausdruck|ton|haltung)\b'
-            },
-            'theme': {
-                'en': r'\b(theme|meaning|message|about|discuss|topic|subject)\b',
-                'de': r'\b(thema|bedeutung|botschaft|über|diskutieren|inhalt)\b'
-            },
-            'structure': {
-                'en': r'\b(structure|pattern|organize|form|arrangement|layout)\b',
-                'de': r'\b(struktur|muster|aufbau|form|anordnung|gliederung)\b'
-            }
+            'sentiment': r'\b(emotion|feel|sentiment|mood|tone)\b',
+            'theme': r'\b(theme|meaning|message|subject)\b',
+            'structure': r'\b(structure|pattern|organize)\b'
         }
-
-        # Check patterns in both languages
-        for qtype, lang_patterns in patterns.items():
-            if any(re.search(pattern, question) for pattern in lang_patterns.values()):
+        for qtype, pattern in patterns.items():
+            if re.search(pattern, question):
                 return qtype
-
         return 'general'
 
-    def format_context(self, chunks: List[str], metadata: List[Dict] = None, language: str = 'en') -> str:
-        """Format context with language-specific section names"""
-        if not chunks:
-            return ""
-
-        def detect_section_type(text: str, index: int, total: int, language: str) -> str:
-            text_lower = text.lower()
-
-            if language == 'de':
-                if re.search(r'\b(refrain|chorus)\b', text_lower):
-                    return "Refrain"
-                elif re.search(r'\b(bridge)\b', text_lower):
-                    return "Bridge"
-                elif index == 0 and re.search(r'\b(intro)\b', text_lower):
-                    return "Intro"
-                elif index == total - 1 and re.search(r'\b(outro)\b', text_lower):
-                    return "Outro"
-                return f"Strophe {index + 1}"
-            else:
-                if re.search(r'\b(chorus|refrain)\b', text_lower):
-                    return "Chorus"
-                elif re.search(r'\b(bridge)\b', text_lower):
-                    return "Bridge"
-                elif index == 0 and re.search(r'\b(intro)\b', text_lower):
-                    return "Intro"
-                elif index == total - 1 and re.search(r'\b(outro)\b', text_lower):
-                    return "Outro"
-                return f"Verse {index + 1}"
+    def format_context(self, chunks, metadata, language='en'):
+        """Format document chunks into labeled sections."""
+        def detect_section_type(text, index, total):
+            if "chorus" in text.lower() or "refrain" in text.lower():
+                return "Chorus"
+            return f"Verse {index + 1}"
 
         formatted_sections = []
-        total_chunks = len(chunks)
-
         for i, chunk in enumerate(chunks):
-            if not chunk.strip():
-                continue
-
-            meta = metadata[i] if metadata else {}
-            sentiment_score = meta.get('sentiment', 0.0)
-
-            section_type = detect_section_type(
-                chunk, i, total_chunks, language)
-            section_header = f"{section_type}"
-
-            if sentiment_score:
-                sentiment_label = ("Positiv" if sentiment_score > 0 else "Negativ") if language == 'de' else \
-                    ("Positive" if sentiment_score > 0 else "Negative")
-                sentiment_strength = ("Stark" if abs(sentiment_score) > 0.7 else "Moderat") if language == 'de' else \
-                    ("Strong" if abs(sentiment_score) > 0.7 else "Moderate")
-                section_header += f" [{sentiment_strength} {sentiment_label}]"
-
-            formatted_sections.append(f"{section_header}:\n{chunk.strip()}")
-
+            section_type = detect_section_type(chunk, i, len(chunks))
+            formatted_sections.append(f"{section_type}:\n{chunk.strip()}")
         return "\n\n".join(formatted_sections)
 
-    @torch.no_grad()
-    def generate_response(self, context: str, question: str, language: str = 'en') -> str:
-        """Generate language-appropriate response"""
+    def generate_response(self, context, question, document_language='en'):
+        """Generate response in English regardless of document language."""
         try:
-            cache_key = f"{hash(context)}-{hash(question)}-{language}"
+            cache_key = f"{hash(context)}-{hash(question)}-{document_language}"
             if cache_key in self._response_cache:
                 return self._response_cache[cache_key]
 
             question_type = self.determine_question_type(question)
-            analysis_prompt = self.get_analysis_prompt(question_type, language)
+            analysis_prompt = self.get_analysis_prompt(question_type)
 
-            # Construct language-specific prompt
-            if language == 'de':
-                prompt = f"""Anweisung: Analysieren Sie die folgenden Lyrics ausschließlich basierend auf dem gegebenen Text.
-Ihre Analyse muss:
-1. Direkte Zitate aus dem Text verwenden
-2. Keine Spekulationen enthalten
-3. Sich nur auf explizit vorhandene Elemente beziehen
-4. Die gestellte Frage konkret beantworten
+            # Use English-based prompt for all responses
+            prompt = f"""Question: {question}\n\nLyrics (in {document_language}):\n{context}\n\nAnalysis:\n{analysis_prompt}\nResponse:"""
 
-Lyrics:
-{context}
+            response = self.generator(
+                prompt,
+                max_length=750,
+                min_length=150,
+                num_return_sequences=1,
+                do_sample=True,
+                no_repeat_ngram_size=4
+            )
+            generated_text = response[0]['generated_text'].strip()
 
-Frage: {question}
+            if not generated_text or generated_text.isspace():
+                return self._get_fallback_response()
 
-Analyserichtlinien:
-{analysis_prompt}
-
-Antwort:"""
-            else:
-                prompt = f"""Instructions: Provide a specific analysis based only on the given lyrics.
-Your analysis must:
-1. Quote directly from the lyrics to support every point
-2. Avoid speculation or external interpretation
-3. Focus only on what is explicitly present in the text
-4. Address the specific question asked
-
-Lyrics:
-{context}
-
-Question: {question}
-
-Analysis Guidelines:
-{analysis_prompt}
-
-Response:"""
-
-            # Generate response with error handling
-            try:
-                response = self.generator(
-                    prompt,
-                    max_length=750,
-                    min_length=150,
-                    num_return_sequences=1,
-                    do_sample=True,
-                    no_repeat_ngram_size=4
-                )
-
-                generated_text = response[0]['generated_text'].strip()
-
-                if not generated_text or generated_text.isspace():
-                    return self._get_fallback_response(language)
-
-                processed_response = self._post_process_response(
-                    generated_text, language)
-                self._response_cache[cache_key] = processed_response
-
-                return processed_response
-
-            except Exception as e:
-                logger.error(f"Error in response generation: {str(e)}")
-                return self._get_fallback_response(language)
+            self._response_cache[cache_key] = generated_text
+            return generated_text
 
         except Exception as e:
-            logger.error(f"Error in generate_response: {str(e)}")
-            return self._get_fallback_response(language)
+            logger.error(f"Error generating response: {str(e)}")
+            return self._get_fallback_response()
 
-    def _get_fallback_response(self, language: str) -> str:
-        """Provide language-appropriate fallback response"""
-        if language == 'de':
-            return "Entschuldigung, ich konnte keine aussagekräftige Analyse generieren. Bitte formulieren Sie Ihre Frage anders."
-        return "I apologize, but I couldn't generate a meaningful analysis. Please try rephrasing your question."
-
-    def _post_process_response(self, text: str, language: str) -> str:
-        """Clean and structure the response with language awareness"""
-        # Remove repeated sentences
-        sentences = text.split('. ')
-        unique_sentences = []
-        seen = set()
-
-        for sentence in sentences:
-            normalized = re.sub(r'\s+', ' ', sentence.lower().strip())
-            if normalized not in seen and len(normalized) > 10:
-                seen.add(normalized)
-                unique_sentences.append(sentence)
-
-        # Join sentences and format paragraphs
-        cleaned_text = '. '.join(unique_sentences)
-        cleaned_text = re.sub(r'([.!?])\s*(?=[A-Z])', r'\1\n\n', cleaned_text)
-
-        # Remove empty lines and normalize spacing
-        cleaned_text = re.sub(r'\n\s*\n', '\n\n', cleaned_text)
-
-        return cleaned_text.strip()
-
-    @transaction.atomic
     def post(self, request, *args, **kwargs):
-        """Handle chat interactions with full error handling"""
+        """Handle chat interactions and generate analysis based on uploaded documents."""
         try:
-            session_id = request.data.get('session_id')
+            session_id = request.data.get('session_id') or str(uuid.uuid4())
             message = request.data.get('message')
             document_id = request.data.get('document_id')
 
             if not message:
                 return Response({"error": "Message is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Session management
-            if not session_id:
-                session_id = str(uuid.uuid4())
-                session = ChatSession.objects.create(session_id=session_id)
-            else:
-                try:
-                    session = ChatSession.objects.get(session_id=session_id)
-                except ChatSession.DoesNotExist:
-                    return Response({"error": "Invalid session ID"}, status=status.HTTP_404_NOT_FOUND)
-
-            # Document handling
-            if document_id:
-                try:
-                    document = UploadedDocument.objects.get(id=document_id)
-                    session.current_document = document
-                    session.save()
-                except UploadedDocument.DoesNotExist:
-                    return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
-            else:
-                if not session.current_document:
-                    return Response({"error": "Document ID is required for querying."}, status=status.HTTP_400_BAD_REQUEST)
-                document = session.current_document
-
-            # Get document language
-            document_language = document.language if document.language in self.supported_languages else 'en'
-
-            # Process user message
+            # Document retrieval and language detection
+            document = self.get_document(document_id)
+            document_language = 'de' if document.language == 'de' else 'en'
             processor = DocumentProcessor()
             sentiment_result = processor.analyze_sentiment(
                 message, document_language)
 
-            # Save user message
-            user_message = ChatMessage.objects.create(
-                session=session,
-                content=message,
-                is_user=True,
-                sentiment_score=sentiment_result['score']
-            )
-
-            # Get context from ChromaDB
+            # Embedding and retrieval with ChromaDB
             query_embedding = processor.generate_embeddings(message)
             chroma_client = get_chroma_client()
             collection = get_or_create_collection(chroma_client)
-
-            # Query with document filter
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=5,
-                where={"document_id": str(document.id)}
-            )
+            results = collection.query(query_embeddings=[query_embedding], n_results=5, where={
+                                       "document_id": str(document.id)})
 
             if not results['documents'][0]:
                 return Response({
                     "session_id": session_id,
-                    "response": self._get_fallback_response(document_language),
-                    "user_sentiment": sentiment_result,
-                    "response_sentiment": 0.0
+                    "response": self._get_fallback_response(),
+                    "user_sentiment": sentiment_result
                 })
 
-            # Generate response
             context = self.format_context(
-                results['documents'][0],
-                results['metadatas'][0],
-                document_language
-            )
+                results['documents'][0], results['metadatas'][0], document_language)
             response = self.generate_response(
                 context, message, document_language)
+            response_sentiment = processor.analyze_sentiment(response, 'en')
 
-            # Analyze response sentiment
-            response_sentiment = processor.analyze_sentiment(
-                response, document_language)
-
-            # Save bot response
-            bot_message = ChatMessage.objects.create(
-                session=session,
-                content=response,
-                is_user=False,
-                sentiment_score=response_sentiment['score'],
-                relevant_document=document
-            )
-
-            # Update session
-            # Update session
-            session.last_interaction = timezone.now()
-            session.save()
+            ChatMessage.objects.create(session_id=session_id, content=response,
+                                       is_user=False, sentiment_score=response_sentiment['score'])
 
             return Response({
                 "session_id": session_id,
                 "response": response,
                 "user_sentiment": sentiment_result,
                 "response_sentiment": response_sentiment['score'],
-                "document_id": document.id,
-                "language": document_language,
-                "metadata": {
-                    "question_type": self.determine_question_type(message),
-                    "context_chunks": len(results['documents'][0]),
-                    "document_title": document.title
-                }
+                "document_id": document.id
             })
 
         except Exception as e:
-            logger.error(f"Error in chat processing: {str(e)}", exc_info=True)
-            return Response({
-                "error": str(e),
-                "detail": "An error occurred while processing your request."
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error(f"Error in chat processing: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    def _validate_language(self, language: str) -> str:
-        """Validate and return supported language code"""
-        if language not in self.supported_languages:
-            logger.warning(
-                f"Unsupported language: {language}, falling back to English")
-            return 'en'
-        return language
-
-    def clear_cache(self):
-        """Clear the response cache"""
-        self._response_cache.clear()
-        logger.info("Response cache cleared")
-
-    def __del__(self):
-        """Cleanup when the view is destroyed"""
-        try:
-            self.clear_cache()
-            if hasattr(self, 'generator'):
-                del self.generator
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception as e:
-            logger.error(f"Error in cleanup: {str(e)}")
+    def _get_fallback_response(self):
+        """Fallback response in case of generation errors."""
+        return "Sorry, no meaningful analysis could be generated."
 
 
 class ChatHistoryView(APIView):
