@@ -1,4 +1,4 @@
-from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline, AutoTokenizer, AutoModel, AutoModelForCausalLM
 from typing import List, Dict, Any, Optional, Union
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -10,12 +10,13 @@ from django.utils import timezone
 from .models import UploadedDocument, ChatSession, ChatMessage
 from .serializers import UploadedDocumentSerializer, ChatSessionSerializer
 from .document_processor import DocumentProcessor
-from .chroma_client import get_chroma_client, get_or_create_collection
+from .chroma_client import get_chroma_client, get_or_create_collection, get_embedding_model
 import uuid
 from transformers import pipeline, AutoTokenizer
 import torch
 import logging
 from pathlib import Path
+from django.shortcuts import get_object_or_404
 import io
 import re
 from functools import lru_cache
@@ -109,39 +110,75 @@ class ChatView(APIView):
         super().__init__(*args, **kwargs)
         self.device = 0 if torch.cuda.is_available() else -1
 
-        # Initialize LLAMA 2 model
         try:
-            model_name = "meta-llama/Llama-3.1-8B"
+            # Initialize embedding model
+            self.embedding_model = get_embedding_model()
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name, use_auth_token=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name, device_map="auto", use_auth_token=True)
-
+            # Initialize text generation pipeline
             self.generator = pipeline(
-                "text-generation",
-                model=self.model,
-                tokenizer=self.tokenizer,
+                "text2text-generation",
+                model="facebook/bart-large-cnn",
+                tokenizer="facebook/bart-large-cnn",
                 device=self.device,
-                device_map="auto",        # Automatically dispatch parts to available devices
-                offload_folder="offload",  # Folder to store offloaded weights
-                offload_index="disk",
                 model_kwargs={
                     "temperature": 0.7,
-                    "top_p": 0.9,
                     "top_k": 50,
                     "repetition_penalty": 1.2,
                     "length_penalty": 1.0,
                     "early_stopping": True
                 }
             )
-            logger.info("Successfully initialized LLama 2 model for RAP-Bot.")
+
+            # Initialize sentiment analysis pipeline
+            self.sentiment_analyzer = pipeline(
+                "sentiment-analysis",
+                model="nlptown/bert-base-multilingual-uncased-sentiment",
+                device=self.device
+            )
+
+            logger.info("Successfully initialized models for chat processing.")
         except Exception as e:
-            logger.error(f"Error initializing LLama 2 model: {str(e)}")
+            logger.error(f"Error initializing models: {str(e)}")
             raise
 
         self._response_cache = {}
         self.supported_languages = {'en', 'de'}
+
+    def get_or_create_session(self, session_id, document_id=None):
+        """Get existing chat session or create a new one."""
+        if session_id:
+            session = ChatSession.objects.filter(session_id=session_id).first()
+            if session:
+                if document_id:
+                    document = get_object_or_404(
+                        UploadedDocument, id=document_id)
+                    session.current_document = document
+                    session.save()
+                return session
+
+        # Create new session
+        if document_id:
+            document = get_object_or_404(UploadedDocument, id=document_id)
+        else:
+            document = None
+
+        session = ChatSession.objects.create(
+            session_id=session_id or str(uuid.uuid4()),
+            current_document=document
+        )
+        return session
+
+    def get_embeddings(self, text):
+        """Generate embeddings for input text using SentenceTransformer."""
+        try:
+            # Convert text to embedding using the sentence transformer model
+            embedding = self.embedding_model.encode(
+                text, convert_to_tensor=True)
+            # Move to CPU and convert to numpy array
+            return embedding.cpu().numpy()
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {str(e)}")
+            raise
 
     def get_analysis_prompt(self, question_type: str) -> str:
         """Generate a prompt to guide the analysis based on question type."""
@@ -180,31 +217,34 @@ class ChatView(APIView):
         return "\n\n".join(formatted_sections)
 
     def generate_response(self, context, question, document_language='en'):
-        """Generate response in English regardless of document language."""
+        """Generate response using BART model."""
         try:
+            # Check cache first
             cache_key = f"{hash(context)}-{hash(question)}-{document_language}"
             if cache_key in self._response_cache:
                 return self._response_cache[cache_key]
 
+            # Determine question type and get appropriate prompt
             question_type = self.determine_question_type(question)
             analysis_prompt = self.get_analysis_prompt(question_type)
 
-            # Use English-based prompt for all responses
-            prompt = f"""Question: {question}\n\nLyrics (in {document_language}):\n{context}\n\nAnalysis:\n{analysis_prompt}\nResponse:"""
+            # Construct full prompt
+            full_prompt = f"Question: {question}\n\nContent:\n{context}\n\nAnalysis:\n{analysis_prompt}"
 
+            # Generate response
             response = self.generator(
-                prompt,
+                full_prompt,
                 max_length=750,
                 min_length=150,
                 num_return_sequences=1,
                 do_sample=True,
-                no_repeat_ngram_size=4
             )
             generated_text = response[0]['generated_text'].strip()
 
             if not generated_text or generated_text.isspace():
                 return self._get_fallback_response()
 
+            # Cache and return response
             self._response_cache[cache_key] = generated_text
             return generated_text
 
@@ -212,61 +252,77 @@ class ChatView(APIView):
             logger.error(f"Error generating response: {str(e)}")
             return self._get_fallback_response()
 
+    def _get_fallback_response(self):
+        """Fallback response in case of generation errors."""
+        return "I apologize, but I couldn't generate a meaningful analysis at this time. Please try rephrasing your question."
+
     def post(self, request, *args, **kwargs):
         """Handle chat interactions and generate analysis based on uploaded documents."""
         try:
-            session_id = request.data.get('session_id') or str(uuid.uuid4())
+            # Extract request data
+            session_id = request.data.get('session_id')
             message = request.data.get('message')
             document_id = request.data.get('document_id')
 
             if not message:
                 return Response({"error": "Message is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Document retrieval and language detection
-            document = self.get_document(document_id)
-            document_language = 'de' if document.language == 'de' else 'en'
-            processor = DocumentProcessor()
-            sentiment_result = processor.analyze_sentiment(
-                message, document_language)
+            # Get or create chat session
+            session = self.get_or_create_session(session_id, document_id)
+            document = session.current_document
 
-            # Embedding and retrieval with ChromaDB
-            query_embedding = processor.generate_embeddings(message)
+            if not document:
+                return Response({"error": "No document selected"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Generate embeddings for the message
+            message_embedding = self.get_embeddings(message)
+
+            # Query ChromaDB with embeddings
             chroma_client = get_chroma_client()
             collection = get_or_create_collection(chroma_client)
-            results = collection.query(query_embeddings=[query_embedding], n_results=5, where={
-                                       "document_id": str(document.id)})
+            results = collection.query(
+                query_embeddings=[message_embedding.tolist()],
+                n_results=5,
+                where={"document_id": str(document.id)}
+            )
 
             if not results['documents'][0]:
                 return Response({
-                    "session_id": session_id,
+                    "session_id": session.session_id,
                     "response": self._get_fallback_response(),
-                    "user_sentiment": sentiment_result
+                    "user_sentiment": self.sentiment_analyzer(message)[0]
                 })
 
+            # Generate response based on context
             context = self.format_context(
-                results['documents'][0], results['metadatas'][0], document_language)
+                results['documents'][0], results['metadatas'][0], document.language)
             response = self.generate_response(
-                context, message, document_language)
-            response_sentiment = processor.analyze_sentiment(response, 'en')
+                context, message, document.language)
 
-            ChatMessage.objects.create(session_id=session_id, content=response,
-                                       is_user=False, sentiment_score=response_sentiment['score'])
+            # Analyze sentiments
+            user_sentiment = self.sentiment_analyzer(message)[0]
+            response_sentiment = self.sentiment_analyzer(response)[0]
+
+            # Create chat message
+            ChatMessage.objects.create(
+                session=session,
+                content=response,
+                is_user=False,
+                sentiment_score=float(response_sentiment['score']),
+                relevant_document=document
+            )
 
             return Response({
-                "session_id": session_id,
+                "session_id": session.session_id,
                 "response": response,
-                "user_sentiment": sentiment_result,
-                "response_sentiment": response_sentiment['score'],
+                "user_sentiment": user_sentiment,
+                "response_sentiment": float(response_sentiment['score']),
                 "document_id": document.id
             })
 
         except Exception as e:
             logger.error(f"Error in chat processing: {str(e)}")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    def _get_fallback_response(self):
-        """Fallback response in case of generation errors."""
-        return "Sorry, no meaningful analysis could be generated."
 
 
 class ChatHistoryView(APIView):

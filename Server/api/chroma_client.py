@@ -1,6 +1,7 @@
 import chromadb
 from chromadb.config import Settings
 import os
+from sentence_transformers import SentenceTransformer
 
 
 def get_chroma_client():
@@ -16,6 +17,14 @@ def get_chroma_client():
     return client
 
 
+def get_embedding_model():
+    """
+    Returns a sentence transformer model that produces 384-dimensional embeddings
+    compatible with ChromaDB's default configuration
+    """
+    return SentenceTransformer('all-MiniLM-L6-v2')  # produces 384-dimensional embeddings
+
+
 def get_or_create_collection(client, name="documents"):
     try:
         # Try to get existing collection
@@ -24,6 +33,7 @@ def get_or_create_collection(client, name="documents"):
         # Create new collection if it doesn't exist
         collection = client.create_collection(
             name=name,
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
+            embedding_dim=384  # Match the dimension of all-MiniLM-L6-v2 embeddings
         )
     return collection
