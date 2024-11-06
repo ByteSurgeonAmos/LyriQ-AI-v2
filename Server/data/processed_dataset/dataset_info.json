@@ -1,0 +1,51 @@
+{
+  "citation": "",
+  "description": "",
+  "features": {
+    "title": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "artist": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "year": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "views": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "lyrics": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "language": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "sentiment": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "emotions": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "grade": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "embeddings": {
+      "feature": {
+        "dtype": "float32",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    }
+  },
+  "homepage": "",
+  "license": ""
+}

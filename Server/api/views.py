@@ -14,6 +14,10 @@ from .chroma_client import get_chroma_client, get_or_create_collection, get_embe
 import uuid
 from transformers import pipeline, AutoTokenizer
 import torch
+from .chat_model.chat_model import ChatModel
+from uuid import uuid4
+
+
 import logging
 from pathlib import Path
 from django.shortcuts import get_object_or_404
@@ -108,41 +112,63 @@ logger = logging.getLogger(__name__)
 class ChatView(APIView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.device = 0 if torch.cuda.is_available() else -1
+        self.chat_model = ChatModel(model_dir="./results")
 
+    def post(self, request, *args, **kwargs):
         try:
-            # Initialize embedding model
-            self.embedding_model = get_embedding_model()
+            # Extract request data
+            session_id = request.data.get('session_id')
+            message = request.data.get('message')
+            document_id = request.data.get('document_id')
 
-            # Initialize text generation pipeline
-            self.generator = pipeline(
-                "text2text-generation",
-                model="facebook/bart-large-cnn",
-                tokenizer="facebook/bart-large-cnn",
-                device=self.device,
-                model_kwargs={
-                    "temperature": 0.7,
-                    "top_k": 50,
-                    "repetition_penalty": 1.2,
-                    "length_penalty": 1.0,
-                    "early_stopping": True
-                }
+            if not message:
+                return Response({"error": "Message is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Get or create chat session
+            session = self.get_or_create_session(session_id, document_id)
+            document = session.current_document
+
+            if not document:
+                return Response({"error": "No document selected"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Generate response using the ChatModel
+            context = self.format_context(document.content, document.language)
+            response = self.chat_model.generate_response(context, message)
+
+            # Analyze sentiments
+            user_sentiment = self.chat_model.sentiment_analyzer(message)
+            response_sentiment = self.chat_model.sentiment_analyzer(response)
+
+            # Analyze emotions (if needed)
+            user_emotions = self.chat_model.analyze_emotions(message)
+            response_emotions = self.chat_model.analyze_emotions(response)
+
+            # Create chat message
+            ChatMessage.objects.create(
+                session=session,
+                content=response,
+                is_user=False,
+                sentiment_score=float(response_sentiment['score']),
+                relevant_document=document,
+                user_sentiment=user_sentiment,
+                response_sentiment=response_sentiment['score'],
+                user_emotions=user_emotions,
+                response_emotions=response_emotions
             )
 
-            # Initialize sentiment analysis pipeline
-            self.sentiment_analyzer = pipeline(
-                "sentiment-analysis",
-                model="nlptown/bert-base-multilingual-uncased-sentiment",
-                device=self.device
-            )
+            return Response({
+                "session_id": session.session_id,
+                "response": response,
+                "user_sentiment": user_sentiment,
+                "response_sentiment": float(response_sentiment['score']),
+                "user_emotions": user_emotions,
+                "response_emotions": response_emotions,
+                "document_id": document.id
+            })
 
-            logger.info("Successfully initialized models for chat processing.")
         except Exception as e:
-            logger.error(f"Error initializing models: {str(e)}")
-            raise
-
-        self._response_cache = {}
-        self.supported_languages = {'en', 'de'}
+            logger.error(f"Error in chat processing: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def get_or_create_session(self, session_id, document_id=None):
         """Get existing chat session or create a new one."""
@@ -168,161 +194,40 @@ class ChatView(APIView):
         )
         return session
 
-    def get_embeddings(self, text):
-        """Generate embeddings for input text using SentenceTransformer."""
-        try:
-            # Convert text to embedding using the sentence transformer model
-            embedding = self.embedding_model.encode(
-                text, convert_to_tensor=True)
-            # Move to CPU and convert to numpy array
-            return embedding.cpu().numpy()
-        except Exception as e:
-            logger.error(f"Error generating embeddings: {str(e)}")
-            raise
-
-    def get_analysis_prompt(self, question_type: str) -> str:
-        """Generate a prompt to guide the analysis based on question type."""
-        prompts = {
-            'sentiment': "Analyze the emotional content in the provided lyrics based on specific evidence.",
-            'theme': "Identify themes in the provided lyrics using direct quotes.",
-            'structure': "Analyze the structure of the provided lyrics and describe any patterns.",
-            'general': "Provide a general analysis of the provided lyrics."
-        }
-        return prompts.get(question_type, prompts['general'])
-
-    def determine_question_type(self, question: str) -> str:
-        """Identify question type based on keywords."""
-        question = question.lower()
-        patterns = {
-            'sentiment': r'\b(emotion|feel|sentiment|mood|tone)\b',
-            'theme': r'\b(theme|meaning|message|subject)\b',
-            'structure': r'\b(structure|pattern|organize)\b'
-        }
-        for qtype, pattern in patterns.items():
-            if re.search(pattern, question):
-                return qtype
-        return 'general'
-
-    def format_context(self, chunks, metadata, language='en'):
-        """Format document chunks into labeled sections."""
+    def format_context(self, content, language='en'):
+        """Format the document content into labeled sections."""
         def detect_section_type(text, index, total):
             if "chorus" in text.lower() or "refrain" in text.lower():
                 return "Chorus"
             return f"Verse {index + 1}"
 
         formatted_sections = []
+        chunks = self.split_content(content)
         for i, chunk in enumerate(chunks):
             section_type = detect_section_type(chunk, i, len(chunks))
             formatted_sections.append(f"{section_type}:\n{chunk.strip()}")
         return "\n\n".join(formatted_sections)
 
-    def generate_response(self, context, question, document_language='en'):
-        """Generate response using BART model."""
-        try:
-            # Check cache first
-            cache_key = f"{hash(context)}-{hash(question)}-{document_language}"
-            if cache_key in self._response_cache:
-                return self._response_cache[cache_key]
-
-            # Determine question type and get appropriate prompt
-            question_type = self.determine_question_type(question)
-            analysis_prompt = self.get_analysis_prompt(question_type)
-
-            # Construct full prompt
-            full_prompt = f"Question: {question}\n\nContent:\n{context}\n\nAnalysis:\n{analysis_prompt}"
-
-            # Generate response
-            response = self.generator(
-                full_prompt,
-                max_length=750,
-                min_length=150,
-                num_return_sequences=1,
-                do_sample=True,
-            )
-            generated_text = response[0]['generated_text'].strip()
-
-            if not generated_text or generated_text.isspace():
-                return self._get_fallback_response()
-
-            # Cache and return response
-            self._response_cache[cache_key] = generated_text
-            return generated_text
-
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            return self._get_fallback_response()
-
-    def _get_fallback_response(self):
-        """Fallback response in case of generation errors."""
-        return "I apologize, but I couldn't generate a meaningful analysis at this time. Please try rephrasing your question."
-
-    def post(self, request, *args, **kwargs):
-        """Handle chat interactions and generate analysis based on uploaded documents."""
-        try:
-            # Extract request data
-            session_id = request.data.get('session_id')
-            message = request.data.get('message')
-            document_id = request.data.get('document_id')
-
-            if not message:
-                return Response({"error": "Message is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Get or create chat session
-            session = self.get_or_create_session(session_id, document_id)
-            document = session.current_document
-
-            if not document:
-                return Response({"error": "No document selected"}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Generate embeddings for the message
-            message_embedding = self.get_embeddings(message)
-
-            # Query ChromaDB with embeddings
-            chroma_client = get_chroma_client()
-            collection = get_or_create_collection(chroma_client)
-            results = collection.query(
-                query_embeddings=[message_embedding.tolist()],
-                n_results=5,
-                where={"document_id": str(document.id)}
-            )
-
-            if not results['documents'][0]:
-                return Response({
-                    "session_id": session.session_id,
-                    "response": self._get_fallback_response(),
-                    "user_sentiment": self.sentiment_analyzer(message)[0]
-                })
-
-            # Generate response based on context
-            context = self.format_context(
-                results['documents'][0], results['metadatas'][0], document.language)
-            response = self.generate_response(
-                context, message, document.language)
-
-            # Analyze sentiments
-            user_sentiment = self.sentiment_analyzer(message)[0]
-            response_sentiment = self.sentiment_analyzer(response)[0]
-
-            # Create chat message
-            ChatMessage.objects.create(
-                session=session,
-                content=response,
-                is_user=False,
-                sentiment_score=float(response_sentiment['score']),
-                relevant_document=document
-            )
-
-            return Response({
-                "session_id": session.session_id,
-                "response": response,
-                "user_sentiment": user_sentiment,
-                "response_sentiment": float(response_sentiment['score']),
-                "document_id": document.id
-            })
-
-        except Exception as e:
-            logger.error(f"Error in chat processing: {str(e)}")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    def split_content(self, content, max_length=500):
+        """Split the content into smaller chunks"""
+        chunks = []
+        for paragraph in content.split('\n'):
+            if len(paragraph) <= max_length:
+                chunks.append(paragraph)
+            else:
+                # Split the paragraph into smaller chunks
+                while len(paragraph) > max_length:
+                    # Find the nearest sentence boundary
+                    split_idx = paragraph[:max_length].rfind('.')
+                    if split_idx == -1:
+                        # No sentence boundary found, split at max_length
+                        split_idx = max_length
+                    chunk = paragraph[:split_idx + 1]
+                    chunks.append(chunk)
+                    paragraph = paragraph[split_idx + 1:].strip()
+                if paragraph:
+                    chunks.append(paragraph)
+        return chunks
 
 
 class ChatHistoryView(APIView):
