@@ -112,7 +112,7 @@ logger = logging.getLogger(__name__)
 class ChatView(APIView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.chat_model = ChatModel(model_dir="./results")
+        self.chat_model = ChatModel()
 
     def post(self, request, *args, **kwargs):
         try:
