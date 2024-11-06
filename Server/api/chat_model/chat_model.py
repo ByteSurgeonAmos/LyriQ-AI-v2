@@ -13,14 +13,17 @@ class ChatModel:
         self,
         model_name: str = "gpt2",  # Change to a causal language model like GPT-2
         sentiment_model_name: str = "nlptown/bert-base-multilingual-uncased-sentiment",
+        # Example emotion model
+        emotion_model_name: str = "j-hartmann/emotion-english-distilroberta-base",
         device: Optional[str] = None
     ):
         """
-        Initialize the ChatModel with a generative model and sentiment analysis capabilities.
+        Initialize the ChatModel with a generative model, sentiment analysis, and emotion analysis capabilities.
 
         Args:
             model_name: Name or path of the generative model (e.g., GPT-2)
             sentiment_model_name: Name or path of the sentiment analysis model
+            emotion_model_name: Name or path of the emotion analysis model
             device: Device to run the model on ('cuda' or 'cpu')
         """
 
@@ -39,9 +42,16 @@ class ChatModel:
             self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(
                 sentiment_model_name)
 
-            # Set the model to the desired device
+            # Initialize emotion analysis components
+            self.emotion_tokenizer = AutoTokenizer.from_pretrained(
+                emotion_model_name)
+            self.emotion_model = AutoModelForSequenceClassification.from_pretrained(
+                emotion_model_name)
+
+            # Set the models to the desired device
             self.model.to(self.device)
             self.sentiment_model.to(self.device)
+            self.emotion_model.to(self.device)
 
             logging.info("Model initialization successful")
 
@@ -105,6 +115,30 @@ class ChatModel:
             logging.error(f"Error analyzing sentiment: {str(e)}")
             return "Error analyzing sentiment"
 
+    def analyze_emotions(self, text: str) -> str:
+        """
+        Analyze the emotions in the provided text using a pre-trained emotion model.
+        """
+        try:
+            inputs = self.emotion_tokenizer(
+                text,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.emotion_model(**inputs)
+                logits = outputs.logits
+                predicted_class = torch.argmax(logits, dim=-1).item()
+
+            return self.map_emotion_to_description(predicted_class)
+
+        except Exception as e:
+            logging.error(f"Error analyzing emotions: {str(e)}")
+            return "Error analyzing emotions"
+
     @staticmethod
     def map_sentiment_to_description(sentiment_label: int) -> str:
         """
@@ -118,3 +152,18 @@ class ChatModel:
             4: "The sentiment in the given text is anger and frustration."
         }
         return sentiment_map.get(sentiment_label, "Sentiment not recognized.")
+
+    @staticmethod
+    def map_emotion_to_description(emotion_label: int) -> str:
+        """
+        Map emotion label to descriptive emotion.
+        """
+        emotion_map = {
+            0: "The emotion in the given text is anger.",
+            1: "The emotion in the given text is joy.",
+            2: "The emotion in the given text is sadness.",
+            3: "The emotion in the given text is fear.",
+            4: "The emotion in the given text is surprise.",
+            5: "The emotion in the given text is disgust."
+        }
+        return emotion_map.get(emotion_label, "Emotion not recognized.")
