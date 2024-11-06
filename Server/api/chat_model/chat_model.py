@@ -1,9 +1,5 @@
-from typing import Optional
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    AutoModelForCausalLM
-)
+from typing import Optional, Dict, Union
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 import torch
 import logging
 
@@ -11,115 +7,146 @@ import logging
 class ChatModel:
     def __init__(
         self,
-        model_name: str = "gpt2",  # Change to a causal language model like GPT-2
+        model_name: str = "gpt2",
         sentiment_model_name: str = "nlptown/bert-base-multilingual-uncased-sentiment",
-        # Example emotion model
         emotion_model_name: str = "j-hartmann/emotion-english-distilroberta-base",
         device: Optional[str] = None
     ):
-        """
-        Initialize the ChatModel with a generative model, sentiment analysis, and emotion analysis capabilities.
-
-        Args:
-            model_name: Name or path of the generative model (e.g., GPT-2)
-            sentiment_model_name: Name or path of the sentiment analysis model
-            emotion_model_name: Name or path of the emotion analysis model
-            device: Device to run the model on ('cuda' or 'cpu')
-        """
-
         self.device = device or (
             "cuda" if torch.cuda.is_available() else "cpu")
         logging.info(f"Using device: {self.device}")
 
-        try:
-            # Initialize generative model (GPT-2 or another causal LM)
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        # Initialize models with improved error handling
+        self._initialize_models(
+            model_name, sentiment_model_name, emotion_model_name)
 
-            # Initialize sentiment analysis components
+    def _initialize_models(self, model_name: str, sentiment_model_name: str, emotion_model_name: str):
+        try:
+            # Initialize generative model
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name).to(self.device)
+
+            # Initialize sentiment and emotion analysis models
             self.sentiment_tokenizer = AutoTokenizer.from_pretrained(
                 sentiment_model_name)
             self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(
-                sentiment_model_name)
-
-            # Initialize emotion analysis components
+                sentiment_model_name).to(self.device)
             self.emotion_tokenizer = AutoTokenizer.from_pretrained(
                 emotion_model_name)
             self.emotion_model = AutoModelForSequenceClassification.from_pretrained(
-                emotion_model_name)
+                emotion_model_name).to(self.device)
 
-            # Set the models to the desired device
-            self.model.to(self.device)
-            self.sentiment_model.to(self.device)
-            self.emotion_model.to(self.device)
-
-            logging.info("Model initialization successful")
+            logging.info("Models successfully initialized")
 
         except Exception as e:
-            logging.error(f"Error initializing models: {str(e)}")
-            raise
+            logging.error(f"Model initialization failed: {str(e)}")
+            raise RuntimeError(f"Failed to initialize models: {str(e)}")
 
-    def generate_response(
-        self,
-        prompt: str,
-        max_length: int = 750,
-        num_return_sequences: int = 1
-    ) -> str:
-        """
-        Generate a response based on the provided prompt using a causal language model.
-        """
+    def generate_response(self, prompt: str, message: str, max_length: int = 750, num_return_sequences: int = 1) -> Union[str, list]:
         try:
-            inputs = self.tokenizer.encode(
-                prompt, return_tensors="pt", max_length=512, truncation=True).to(self.device)
+            # Validate input
+            if not prompt or not message:
+                raise ValueError("Prompt and message cannot be empty")
 
+            # Construct prompt with context separator
+            full_prompt = self._construct_prompt(prompt, message)
+
+            # Tokenize input
+            inputs = self._tokenize_input(full_prompt)
+
+            # Generate response with fine-tuned parameters for creativity and diversity
             output_ids = self.model.generate(
-                inputs,
-                max_length=max_length,
-                num_return_sequences=num_return_sequences,
+                inputs['input_ids'].to(self.device),
+                attention_mask=inputs['attention_mask'].to(self.device),
+                max_length=min(max_length, 1024),  # Reasonable upper bound
+                num_return_sequences=min(num_return_sequences, 3),
                 do_sample=True,
                 top_k=50,
-                top_p=0.95,
-                num_beams=2,
-                early_stopping=True
+                top_p=0.85,
+                temperature=0.9,
+                num_beams=5,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.2,
+                early_stopping=True,
+                pad_token_id=self.tokenizer.pad_token_id
             )
 
-            generated_texts = self.tokenizer.decode(
-                output_ids[0], skip_special_tokens=True)
-            return generated_texts.strip()
+            # Process generated responses
+            return self._post_process_generation(output_ids, num_return_sequences)
 
         except Exception as e:
-            logging.error(f"Error generating response: {str(e)}")
-            return f"Error generating response: {str(e)}"
+            logging.error(f"Response generation failed: {str(e)}")
+            return f"Error: Unable to generate response due to: {str(e)}"
 
-    def sentiment_analyzer(self, text: str) -> str:
-        """
-        Analyze the sentiment of the provided text using BERT.
-        """
+    def _construct_prompt(self, prompt: str, message: str) -> str:
+        # Trim extra whitespace and format prompt with separator for clarity
+        return f"{prompt.strip()}\n---\n{message.strip()}"
+
+    def _tokenize_input(self, text: str) -> Dict:
+        return self.tokenizer(
+            text,
+            return_tensors="pt",
+            max_length=512,
+            truncation=True,
+            padding=True
+        )
+
+    def _post_process_generation(self, output_ids: torch.Tensor, num_return_sequences: int) -> Union[str, list]:
+        generated_texts = []
+        for i in range(num_return_sequences):
+            text = self.tokenizer.decode(
+                output_ids[i], skip_special_tokens=True)
+            cleaned_text = self._clean_generated_text(text)
+            generated_texts.append(cleaned_text)
+
+        return generated_texts[0] if num_return_sequences == 1 else generated_texts
+
+    def _clean_generated_text(self, text: str) -> str:
+        # Remove repetitive newlines and duplicated phrases
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        unique_lines = []
+        for line in lines:
+            if line not in unique_lines[-3:]:  # Avoid last 3 repeated lines
+                unique_lines.append(line)
+        return '\n'.join(unique_lines)
+
+    def sentiment_analyzer(self, text: str) -> Dict[str, str]:
+        """Analyze sentiment of input text and return a sentiment statement."""
         try:
             inputs = self.sentiment_tokenizer(
-                text,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=512
-            ).to(self.device)
-
+                text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
             with torch.no_grad():
-                outputs = self.sentiment_model(**inputs)
-                logits = outputs.logits
+                logits = self.sentiment_model(**inputs).logits
                 predicted_class = torch.argmax(logits, dim=-1).item()
-
-            return self.map_sentiment_to_description(predicted_class)
+                scores = torch.softmax(logits, dim=-1)
+                score = scores[0][predicted_class].item()
+            sentiment_statement = self.map_sentiment_to_statement(
+                predicted_class)
+            return {"sentiment": sentiment_statement, "score": float(score)}
 
         except Exception as e:
-            logging.error(f"Error analyzing sentiment: {str(e)}")
-            return "Error analyzing sentiment"
+            logging.error(f"Error in sentiment analysis: {str(e)}")
+            return {"sentiment": "The sentiment of the text is neutral.", "score": 0.0}
 
-    def analyze_emotions(self, text: str) -> str:
-        """
-        Analyze the emotions in the provided text using a pre-trained emotion model.
-        """
+    def map_sentiment_to_statement(self, sentiment_label: int) -> str:
+        sentiment_map = {
+            0: "The sentiment of the text is that of love.",
+            1: "The sentiment of the text is negative.",
+            2: "The sentiment of the text is that of emotions.",
+            3: "The sentiment of the text is positive.",
+            4: "The sentiment of the text is very positive."
+        }
+        return sentiment_map.get(sentiment_label, "The sentiment of the text is not recognized.")
+
+    def analyze_emotions(self, text: str) -> Dict[str, float]:
+        """Analyze emotions in input text and return a dictionary of emotions with scores."""
         try:
+            if not text:
+                return {}
+
+            # Tokenize input for emotion model
             inputs = self.emotion_tokenizer(
                 text,
                 return_tensors="pt",
@@ -131,39 +158,26 @@ class ChatModel:
             with torch.no_grad():
                 outputs = self.emotion_model(**inputs)
                 logits = outputs.logits
-                predicted_class = torch.argmax(logits, dim=-1).item()
+                scores = torch.softmax(logits, dim=-1)[0]
 
-            return self.map_emotion_to_description(predicted_class)
+                # Map scores to emotion labels
+                emotions = {self.map_emotion_to_description(i): float(
+                    score) for i, score in enumerate(scores)}
+
+            return emotions
 
         except Exception as e:
-            logging.error(f"Error analyzing emotions: {str(e)}")
-            return "Error analyzing emotions"
+            logging.error(f"Error in emotion analysis: {str(e)}")
+            return {}
 
-    @staticmethod
-    def map_sentiment_to_description(sentiment_label: int) -> str:
-        """
-        Map sentiment label to descriptive sentiment.
-        """
-        sentiment_map = {
-            0: "The sentiment in the given text is sadness and despair.",
-            1: "The sentiment in the given text is longing and urgency.",
-            2: "The sentiment in the given text is joy and excitement.",
-            3: "The sentiment in the given text is neutrality and calm.",
-            4: "The sentiment in the given text is anger and frustration."
-        }
-        return sentiment_map.get(sentiment_label, "Sentiment not recognized.")
-
-    @staticmethod
-    def map_emotion_to_description(emotion_label: int) -> str:
-        """
-        Map emotion label to descriptive emotion.
-        """
+    def map_emotion_to_description(self, emotion_label: int) -> str:
+        """Map emotion model labels to human-readable descriptions."""
         emotion_map = {
-            0: "The emotion in the given text is anger.",
-            1: "The emotion in the given text is joy.",
-            2: "The emotion in the given text is sadness.",
-            3: "The emotion in the given text is fear.",
-            4: "The emotion in the given text is surprise.",
-            5: "The emotion in the given text is disgust."
+            0: "Anger",
+            1: "Joy",
+            2: "Sadness",
+            3: "Fear",
+            4: "Surprise",
+            5: "Disgust"
         }
-        return emotion_map.get(emotion_label, "Emotion not recognized.")
+        return emotion_map.get(emotion_label, "Emotion not recognized")

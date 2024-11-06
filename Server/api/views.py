@@ -109,6 +109,9 @@ class DocumentUploadView(APIView):
 logger = logging.getLogger(__name__)
 
 
+logger = logging.getLogger(__name__)
+
+
 class ChatView(APIView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -139,6 +142,12 @@ class ChatView(APIView):
             user_sentiment = self.chat_model.sentiment_analyzer(message)
             response_sentiment = self.chat_model.sentiment_analyzer(response)
 
+            # Ensure score fields are floats
+            user_sentiment_score = float(user_sentiment.get('score', 0)) if isinstance(
+                user_sentiment.get('score'), str) else user_sentiment.get('score', 0)
+            response_sentiment_score = float(response_sentiment.get('score', 0)) if isinstance(
+                response_sentiment.get('score'), str) else response_sentiment.get('score', 0)
+
             # Analyze emotions (if needed)
             user_emotions = self.chat_model.analyze_emotions(message)
             response_emotions = self.chat_model.analyze_emotions(response)
@@ -148,10 +157,10 @@ class ChatView(APIView):
                 session=session,
                 content=response,
                 is_user=False,
-                sentiment_score=float(response_sentiment['score']),
+                sentiment_score=response_sentiment_score,
                 relevant_document=document,
                 user_sentiment=user_sentiment,
-                response_sentiment=response_sentiment['score'],
+                response_sentiment=response_sentiment_score,
                 user_emotions=user_emotions,
                 response_emotions=response_emotions
             )
@@ -160,7 +169,7 @@ class ChatView(APIView):
                 "session_id": session.session_id,
                 "response": response,
                 "user_sentiment": user_sentiment,
-                "response_sentiment": float(response_sentiment['score']),
+                "response_sentiment": response_sentiment_score,
                 "user_emotions": user_emotions,
                 "response_emotions": response_emotions,
                 "document_id": document.id
@@ -183,11 +192,8 @@ class ChatView(APIView):
                 return session
 
         # Create new session
-        if document_id:
-            document = get_object_or_404(UploadedDocument, id=document_id)
-        else:
-            document = None
-
+        document = get_object_or_404(
+            UploadedDocument, id=document_id) if document_id else None
         session = ChatSession.objects.create(
             session_id=session_id or str(uuid.uuid4()),
             current_document=document
@@ -209,7 +215,7 @@ class ChatView(APIView):
         return "\n\n".join(formatted_sections)
 
     def split_content(self, content, max_length=500):
-        """Split the content into smaller chunks"""
+        """Split the content into smaller chunks."""
         chunks = []
         for paragraph in content.split('\n'):
             if len(paragraph) <= max_length:
@@ -220,7 +226,6 @@ class ChatView(APIView):
                     # Find the nearest sentence boundary
                     split_idx = paragraph[:max_length].rfind('.')
                     if split_idx == -1:
-                        # No sentence boundary found, split at max_length
                         split_idx = max_length
                     chunk = paragraph[:split_idx + 1]
                     chunks.append(chunk)

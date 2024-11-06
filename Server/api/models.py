@@ -26,14 +26,21 @@ class ChatSession(models.Model):
 
 
 class ChatMessage(models.Model):
-    session = models.ForeignKey(
-        ChatSession, on_delete=models.CASCADE, related_name='messages')
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE)
     content = models.TextField()
-    is_user = models.BooleanField(default=True)
+    is_user = models.BooleanField()
     sentiment_score = models.FloatField(null=True, blank=True)
-    timestamp = models.DateTimeField(auto_now_add=True)
     relevant_document = models.ForeignKey(
         UploadedDocument, null=True, blank=True, on_delete=models.SET_NULL)
+
+    # Additional fields for sentiment and emotion analysis
+    user_sentiment = models.CharField(max_length=100, null=True, blank=True)
+    response_sentiment = models.FloatField(null=True, blank=True)
+    user_emotions = models.JSONField(null=True, blank=True)
+    response_emotions = models.JSONField(null=True, blank=True)
+
+    # Add the timestamp field
+    timestamp = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['timestamp']
